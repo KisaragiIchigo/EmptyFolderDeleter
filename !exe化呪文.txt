@@ -1,0 +1,4 @@
+pyinstaller main.py ^
+  --name "KaraFolderCleaner" ^
+  --onefile --noconsole ^
+  --icon karafo.ico
