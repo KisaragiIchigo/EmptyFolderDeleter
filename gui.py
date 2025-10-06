@@ -1,19 +1,19 @@
 import os
 from typing import List
 
-from PySide6.QtCore import Qt, QPoint, QEvent, QSize
-from PySide6.QtGui import QIcon, QAction
+from PySide6.QtCore import Qt, QPoint, QEvent, QSize, Signal
+from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QPalette, QColor
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QApplication,
     QListWidget, QListWidgetItem, QDialog, QProgressBar, QMessageBox, QTextBrowser,
-    QSpacerItem, QSizePolicy, QCheckBox, QFileDialog
+    QSizePolicy, QCheckBox, QFileDialog, QAbstractItemView
 )
 
 import processor
 import utils
 
-#  スタイル定数 
-PRIMARY = "#4169e1"
+#  スタイル定数
+PRIMARY = "#4169e1" 
 ACCENT  = "#7000e0"
 BG_GLASS = "rgba(5,5,51,200)"
 BORDER  = "3px solid rgba(65,105,255,255)"
@@ -39,7 +39,7 @@ def build_qss(compact: bool = False) -> str:
         background-color:{BG_GLASS}; border:{BORDER}; border-radius:{RADIUS_CARD}px;
         background-image:{glass_bg_image}; background-repeat:no-repeat; background-position:0 0;
     }}
-    QLabel#titleLabel {{ color:#fff; font-weight:bold; }}
+    QLabel#titleLabel {{ color:#fff; font-weight:bold; font-size:8pt;}}
     QLabel#dropArea {{
         border: 2px dashed {PRIMARY}; border-radius:12px;
         color:#b8dcff; background: rgba(25,25,112,0.45); font-weight:bold;
@@ -51,22 +51,43 @@ def build_qss(compact: bool = False) -> str:
     QWidget.DarkPanel {{
         background:#2f2f2f; border-radius:{RADIUS_PANEL}px; border:1px solid #000; padding:8px;
     }}
-    QListWidget {{ background:#ffe4e1; color:#191970; border:1px solid #777; }}
+
+    /* === 選択リストの視認性UP === */
+    QListWidget {{
+        background:#fff5f7;           /* 未選択の地色 */
+        color:#191970;                 /* 文字は濃紺でくっきり */
+        border:1px solid #777;
+        outline: none;
+        alternate-background-color: #ffe9ef;   /* 交互行でコントラスト */
+    }}
+    QListWidget::item {{
+        padding: 4px 6px;              /* 当たり判定を広く */
+    }}
+    QListWidget::item:selected {{
+        background: {PRIMARY};         /* 選択中の背景をブランド色に */
+        color: #fffafa;                /* 文字は白系でコントラスト最大化 */
+    }}
+    QListWidget::item:selected:active {{
+        background: {PRIMARY};
+        color: #fffafa;
+    }}
+
     QProgressBar {{ border:1px solid #555; border-radius:6px; background:#333; color:white; text-align:center; }}
     QProgressBar::chunk {{ background:{PRIMARY}; border-radius:6px; }}
     QTextBrowser#readmeView {{ color:#ffe4e1; background:#333; border-radius:{RADIUS_PANEL}px; padding:8px; }}
     QCheckBox {{ color:#fff; }}
     """
 
-#  共通：フレームレス移動＆端リサイズのベース 
+#  共通：フレームレス移動＆端リサイズのベース
 class FramelessCard(QWidget):
     def __init__(self, title: str):
         super().__init__()
         self.setWindowTitle(title)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(820, 560)
-        self.setMinimumSize(QSize(660, 440))
+
+        self.resize(400, 400)  # 初期サイズ
+        self.setMinimumSize(QSize(400, 400))
 
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         self.bgRoot = QWidget(); self.bgRoot.setObjectName("bgRoot")
@@ -80,7 +101,7 @@ class FramelessCard(QWidget):
         bgLay.addWidget(self.card)
 
         self.cardLay = QVBoxLayout(self.card)
-        self.cardLay.setContentsMargins(14, 14, 14, 14)
+        self.cardLay.setContentsMargins(10, 10, 10, 10)
         self.cardLay.setSpacing(GAP)
 
         # タイトルバー
@@ -174,14 +195,17 @@ class FramelessCard(QWidget):
             h = max(minh, h + dy)
         self.setGeometry(x, y, w, h)
 
-#  D&Dラベル 
+#  D&Dラベル
 class DropArea(QLabel):
+    filesDropped = Signal(list)
+
     def __init__(self):
         super().__init__("ここにフォルダをドラッグ＆ドロップ")
         self.setObjectName("dropArea")
         self.setAlignment(Qt.AlignCenter)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(200)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
@@ -189,9 +213,9 @@ class DropArea(QLabel):
 
     def dropEvent(self, e):
         files = [u.toLocalFile() for u in e.mimeData().urls()]
-        self.parent().on_drop(files)  # MainWindowに通知
+        self.filesDropped.emit(files)
 
-#  README 
+#  README
 README_MD = r"""
 # 空フォルダ削除ツール ©️2025 KisaragiIchigo
 
@@ -233,7 +257,7 @@ class ReadmeDialog(FramelessCard):
         self.cardLay.addWidget(panel, 1)
         self.resize(700, 520)
 
-#  削除確認ダイアログ 
+#  削除確認ダイアログ
 class ConfirmDialog(FramelessCard):
     def __init__(self, folders: List[str], parent=None):
         super().__init__("削除するフォルダの確認 ©️2025 KisaragiIchigo")
@@ -243,27 +267,70 @@ class ConfirmDialog(FramelessCard):
         panel = QWidget(); panel.setProperty("class", "DarkPanel")
         lay = QVBoxLayout(panel); lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
 
+        # リスト
         self.listw = QListWidget()
+        self.listw.setSelectionMode(QAbstractItemView.ExtendedSelection) 
+        self.listw.setFocusPolicy(Qt.StrongFocus)                         
+        self.listw.setAlternatingRowColors(True)
         for p in folders:
             it = QListWidgetItem(p)
-            it.setSelected(True)  # 既定で全選択
+            it.setSelected(True) 
             self.listw.addItem(it)
+        self.listw.selectAll() 
+
+        QShortcut(QKeySequence.SelectAll, self.listw, self.listw.selectAll)
+        QShortcut(QKeySequence("Ctrl+D"), self.listw, self.listw.clearSelection)
+        QShortcut(QKeySequence("Ctrl+I"), self.listw, self._invert_selection)
+
         lay.addWidget(self.listw, 1)
 
+        # 選択件数ラベル
         self.countLabel = QLabel(f"選択中: {len(folders)} 個")
         self.listw.itemSelectionChanged.connect(self._on_sel_changed)
         lay.addWidget(self.countLabel)
 
+        # ------------- 操作ボタン行 -------------
         btn_row = QHBoxLayout()
+        self.btnSelAll   = QPushButton("全選択")
+        self.btnSelNone  = QPushButton("全解除")
+        self.btnSelInvert= QPushButton("反転")
+        self.btnSelAll.setToolTip("すべて選択（Ctrl+A）")
+        self.btnSelNone.setToolTip("すべて解除（Ctrl+D）")
+        self.btnSelInvert.setToolTip("選択を反転（Ctrl+I）")
+        self.btnSelAll.clicked.connect(self.listw.selectAll)
+        self.btnSelNone.clicked.connect(self.listw.clearSelection)
+        self.btnSelInvert.clicked.connect(self._invert_selection)
+
+        btn_row.addWidget(self.btnSelAll)
+        btn_row.addWidget(self.btnSelNone)
+        btn_row.addWidget(self.btnSelInvert)
+        btn_row.addStretch(1)
+
+        # 右側：確定/中止
         self.btnDelete = QPushButton("選択したフォルダを削除")
         self.btnCancel = QPushButton("キャンセル")
-        btn_row.addStretch(1)
         btn_row.addWidget(self.btnDelete)
         btn_row.addWidget(self.btnCancel)
+
         lay.addLayout(btn_row)
+        # --------------------------------------
 
         self.cardLay.addWidget(panel, 1)
-        self.resize(720, 520)
+        self.resize(760, 540)
+        pal = self.listw.palette()
+        pal.setColor(QPalette.Highlight, QColor(PRIMARY))
+        pal.setColor(QPalette.HighlightedText, QColor("#fffafa"))
+        pal.setColor(QPalette.AlternateBase, QColor("#ffe9ef"))
+        self.listw.setPalette(pal)
+
+    def _invert_selection(self):
+        """選択反転"""
+        self.listw.blockSignals(True) 
+        for i in range(self.listw.count()):
+            it = self.listw.item(i)
+            it.setSelected(not it.isSelected())
+        self.listw.blockSignals(False)
+        self._on_sel_changed()
 
     def _on_sel_changed(self):
         self.countLabel.setText(f"選択中: {len(self.selected_paths())} 個")
@@ -271,26 +338,26 @@ class ConfirmDialog(FramelessCard):
     def selected_paths(self) -> List[str]:
         return [i.text() for i in self.listw.selectedItems()]
 
-#  メインウィンドウ 
+#  メインウィンドウ
 class MainWindow(FramelessCard):
     def __init__(self):
         super().__init__(TITLE)
 
-        # アイコン（任意）
+        # アイコン
         icon_path = utils.resource_path("karafo.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
         # メインUI
         drop_panel = QWidget(); drop_panel.setProperty("class", "DarkPanel")
-        v = QVBoxLayout(drop_panel); v.setContentsMargins(10,10,10,10); v.setSpacing(GAP)
+        v = QVBoxLayout(drop_panel)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
 
-        self.dropArea = DropArea(); v.addWidget(self.dropArea)
-        hint = QLabel("※ 複数フォルダOK / ネットワークドライブ可")
-        hint.setStyleSheet("color:#e0ffff;")
-        v.addWidget(hint)
+        self.dropArea = DropArea()
+        self.dropArea.filesDropped.connect(self.on_drop)
+        v.addWidget(self.dropArea, 10)
 
-        # オプション
         opt_row = QHBoxLayout()
         self.cb_remove_garbage = QCheckBox("Thumbs/desktop.ini なども削除")
         self.cb_remove_garbage.setChecked(True)
@@ -299,18 +366,17 @@ class MainWindow(FramelessCard):
         opt_row.addWidget(self.cb_remove_garbage)
         opt_row.addStretch(1)
         opt_row.addWidget(self.cb_fast_rescan)
-        v.addLayout(opt_row)
+        v.addLayout(opt_row, 0)
 
-        # 操作ボタン行
         row = QHBoxLayout()
         self.btnReadme = QPushButton("README")
-        self.btnOpen = QPushButton("フォルダを選択して解析")
+        self.btnOpen = QPushButton("フォルダを選択して解析（複数可）")
         row.addWidget(self.btnReadme); row.addStretch(1); row.addWidget(self.btnOpen)
-        v.addLayout(row)
+        v.addLayout(row, 0)
 
-        # 進捗
         self.progress = QProgressBar()
-        v.addWidget(self.progress)
+        self.progress.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        v.addWidget(self.progress, 0)
 
         self.cardLay.addWidget(drop_panel, 1)
 
@@ -318,11 +384,10 @@ class MainWindow(FramelessCard):
         self.btnReadme.clicked.connect(self._show_readme)
         self.btnOpen.clicked.connect(self._select_and_process)
 
-        # メニュー
+        # コンテキストメニュー
         self.setContextMenuPolicy(Qt.ActionsContextMenu)
         act = QAction("READMEを開く", self); act.triggered.connect(self._show_readme)
         self.addAction(act)
-
 
     def on_drop(self, paths: List[str]):
         dirs = [p for p in paths if os.path.isdir(p)]
@@ -333,11 +398,18 @@ class MainWindow(FramelessCard):
 
     # --- 手動選択 ---
     def _select_and_process(self):
-        path = QFileDialog.getExistingDirectory(self, "フォルダを選択", os.getcwd(),
-                                                QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontResolveSymlinks)
-        if not path:
-            return
-        self._process([path])
+        dlg = QFileDialog(self, "解析対象のフォルダを選択（Ctrl+A / Shift / Ctrl で複数可）", os.getcwd())
+        dlg.setFileMode(QFileDialog.FileMode.Directory)
+        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dlg.setOption(QFileDialog.Option.ReadOnly, True)
+        dlg.setLabelText(QFileDialog.Accept, "解析開始")
+        dlg.setLabelText(QFileDialog.Reject, "キャンセル")
+
+        if dlg.exec():
+            paths = dlg.selectedFiles()
+            if paths:
+                self._process(paths)
 
     # --- 共通：解析～確認～削除 ---
     def _process(self, dirs: List[str]):
@@ -346,8 +418,8 @@ class MainWindow(FramelessCard):
 
         empty = processor.find_empty_folders(
             dirs,
-            ignore_known_garbage=True,                    # “実質空”判定（Thumbs等は無視）
-            fast_rescan=self.cb_fast_rescan.isChecked(),  # 高速リスキャン
+            ignore_known_garbage=True,
+            fast_rescan=self.cb_fast_rescan.isChecked(),
         )
         if not empty:
             QMessageBox.information(self, "結果", "空フォルダは見つかりませんでした。")
@@ -376,14 +448,13 @@ class MainWindow(FramelessCard):
             progress_cb=update_progress,
             remove_known_garbage_files=self.cb_remove_garbage.isChecked(),
             ignore_known_garbage_for_empty=True,
-            max_pass=3, 
+            max_pass=3,
         )
         self.titleLabel.setText(TITLE)
         self.progress.setValue(0)
         dlg.close()
 
         QMessageBox.information(self, "完了", f"{removed} 個の空フォルダを削除しました。")
-        # 削除後はキャッシュを掃除
         for t in targets:
             utils.cache_clear_under(t)
 
