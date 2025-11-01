@@ -449,12 +449,14 @@ class MainWindow(FramelessCard):
             remove_known_garbage_files=self.cb_remove_garbage.isChecked(),
             ignore_known_garbage_for_empty=True,
             max_pass=3,
+            fast_rescan=self.cb_fast_rescan.isChecked(), # ★ fast_rescan を渡す
         )
         self.titleLabel.setText(TITLE)
         self.progress.setValue(0)
         dlg.close()
 
         QMessageBox.information(self, "完了", f"{removed} 個の空フォルダを削除しました。")
+        # 削除した可能性のあるルート配下のキャッシュをクリア
         for t in targets:
             utils.cache_clear_under(t)
 
