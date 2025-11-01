@@ -1,57 +1,15 @@
 import os
-import stat
+import stat # ★ chmod の権限付与に使うので import は残す
 from typing import Iterable, List, Callable, Sequence
 import utils
 
 
-IGNORABLE_FILES: Sequence[str] = ("Thumbs.db", "desktop.ini", ".DS_Store")
+# ★ utils.py に移動した関数群を削除
+# IGNORABLE_FILES
+# _is_effectively_empty
+# _effective_count
+# _delete_known_garbage
 
-def _is_effectively_empty(dirpath: str, ignore_known_garbage: bool) -> bool:
-    """フォルダが“実質空”か判定（ignore_known_garbage=True の場合は既知ゴミを無視）"""
-    try:
-        with os.scandir(dirpath) as it:
-            for entry in it:
-                if entry.is_dir(follow_symlinks=False):
-                    return False
-                if ignore_known_garbage and entry.name in IGNORABLE_FILES:
-                    continue
-                return False
-        return True
-    except Exception as e:
-        utils.save_error_log(dirpath, f"{type(e).__name__}: {e}")
-        return False
-
-def _effective_count(dirpath: str, ignore_known_garbage: bool) -> int:
-    """“実質空”評価での要素数（0なら空扱い）"""
-    try:
-        count = 0
-        with os.scandir(dirpath) as it:
-            for entry in it:
-                if entry.is_dir(follow_symlinks=False):
-                    return 1  # 子ディレクトリがある時点で空ではない
-                if ignore_known_garbage and entry.name in IGNORABLE_FILES:
-                    continue
-                count += 1
-                if count > 0:
-                    return count
-        return 0
-    except Exception as e:
-        utils.save_error_log(dirpath, f"{type(e).__name__}: {e}")
-        return 1  # 不明なら空ではない扱い
-
-def _delete_known_garbage(dirpath: str) -> None:
-    """既知ゴミファイルを削除（存在する場合のみ）。失敗はログに書いて続行。"""
-    try:
-        with os.scandir(dirpath) as it:
-            for entry in it:
-                if entry.is_file(follow_symlinks=False) and entry.name in IGNORABLE_FILES:
-                    try:
-                        os.chmod(entry.path, stat.S_IWUSR | stat.S_IRUSR)
-                        os.remove(entry.path)
-                    except Exception as e:
-                        utils.save_error_log(entry.path, f"{type(e).__name__}: {e}")
-    except Exception as e:
-        utils.save_error_log(dirpath, f"{type(e).__name__}: {e}")
 
 def find_empty_folders(
     root_paths: Iterable[str],
@@ -65,27 +23,15 @@ def find_empty_folders(
     """
     found = []
 
-    def is_dir_empty_cached(p: str) -> bool:
-        if not fast_rescan:
-            return _effective_count(p, ignore_known_garbage) == 0
-        try:
-            st = os.stat(p)
-        except FileNotFoundError:
-            return False
-        cached = utils.cache_get(p)
-        if cached and cached[0] == st.st_mtime:
-            # 変更なし→キャッシュ値で判定
-            return cached[1] == 0
-        # 再計測してキャッシュ更新
-        cnt = _effective_count(p, ignore_known_garbage)
-        utils.cache_set(p, st.st_mtime, cnt)
-        return cnt == 0
+    # ★ローカル関数 is_dir_empty_cached は削除
 
     for root in root_paths:
         if not os.path.isdir(root):
             continue
+        # topdown=False で、深い階層から順に評価
         for dirpath, dirnames, filenames in os.walk(root, topdown=False):
-            if is_dir_empty_cached(dirpath):
+            # ★ utils.is_dir_empty_cached を呼ぶように変更
+            if utils.is_dir_empty_cached(dirpath, ignore_known_garbage, fast_rescan):
                 found.append(dirpath)
 
     # 重複除去＆パスでソート
@@ -97,59 +43,95 @@ def delete_empty_folders(
     remove_known_garbage_files: bool = True,
     ignore_known_garbage_for_empty: bool = True,
     max_pass: int = 3,
+    fast_rescan: bool = False, # ★ fast_rescan 引数を追加
 ) -> int:
     """
-    空フォルダを深い階層から削除。安定化のため最大 max_pass 回まで全体を再試行。
+    空フォルダを深い階層から削除。削除成功時に親フォルダも対象に加え、
+    max_pass 回まで全体を再試行することでネストした空フォルダに対応する。
     - remove_known_garbage_files: 既知ゴミファイルを先に消してから判定/削除
     - ignore_known_garbage_for_empty: “実質空”判定で既知ゴミを無視
+    - fast_rescan: 判定時にキャッシュを利用するか
     戻り値: 削除できた件数（合計）
     """
     if not folders:
         return 0
 
-    # 常に深い順で処理
-    folders = sorted(list(set(folders)), key=len, reverse=True)
-    total_target = len(folders)
+    # 処理対象をセットで管理 (重複除去と動的な追加のため)
+    target_set = set(folders)
     deleted_total = 0
-    curr = 0
+    
+    # 進捗の母数は、最初に見つかったフォルダ数
+    total_target_initial = len(target_set)
+    # 実際に処理した（進捗にカウントした）フォルダのセット
+    progress_counted_set = set()
 
+    # max_pass 回、削除を試行
     for attempt in range(1, max_pass + 1):
-        deleted_in_pass = 0
+        if not target_set:
+            break # 対象がなくなれば終了
 
-        for folder in list(folders):  # 動的に縮めるのでコピーを回す
-            curr += 1
-            basename = os.path.basename(folder) or folder
+        deleted_in_pass = 0
+        
+        # 常に深い順で処理するために、毎回ソート
+        current_targets_sorted = sorted(list(target_set), key=len, reverse=True)
+
+        for folder in current_targets_sorted:
+            
+            # このフォルダを進捗としてカウントしたか？ (初回のみカウント)
+            if folder not in progress_counted_set:
+                 progress_counted_set.add(folder)
+                 if progress_cb:
+                    progress_val = min(len(progress_counted_set), total_target_initial)
+                    basename = os.path.basename(folder) or folder
+                    progress_cb(progress_val, total_target_initial, basename)
 
             try:
                 if not os.path.isdir(folder):
-                    # 既に無ければ成功扱いでリストから除外
-                    deleted_in_pass += 1
-                    folders.remove(folder)
+                    # 既に無ければ（親が先に消えたなどで）リストから除外
+                    target_set.discard(folder)
                     continue
 
                 if remove_known_garbage_files:
-                    _delete_known_garbage(folder)
+                    utils._delete_known_garbage(folder) # ★ utils. 経由に変更
 
-                # “実質空”なら削除
-                if _is_effectively_empty(folder, ignore_known_garbage_for_empty):
+                # ★ _is_effectively_empty を utils.is_dir_empty_cached に変更
+                # ★ fast_rescan を渡す
+                if utils.is_dir_empty_cached(folder, ignore_known_garbage_for_empty, fast_rescan):
                     try:
-                        os.chmod(folder, stat.S_IWUSR | stat.S_IXUSR | stat.S_IRUSR)
+                        # 既存の権限に書き込み・実行権限を追加
+                        current_mode = os.stat(folder).st_mode
+                        os.chmod(folder, current_mode | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRUSR)
                     except Exception:
-                        pass
-                    os.rmdir(folder)
+                        pass # 失敗しても rmdir は試行
+                        
+                    os.rmdir(folder) # フォルダ削除
+                    
                     deleted_in_pass += 1
-                    folders.remove(folder)
+                    deleted_total += 1
+                    target_set.discard(folder) # 削除成功
+                    utils.cache_clear_under(folder) # 削除したのでキャッシュクリア
+
+                    # --- ★重要：親フォルダを次のパスの処理対象に追加 ---
+                    parent = os.path.dirname(folder)
+                    if parent and parent != folder:
+                        # 親を次のチェック対象に追加する
+                        target_set.add(parent)
 
             except Exception as e:
+                # 権限エラーなどで削除失敗した場合、target_set に残るので
+                # 次のパスでリトライされる
                 utils.save_error_log(folder, f"{type(e).__name__}: {e}")
-
-            finally:
-                if progress_cb:
-                    progress_cb(min(curr, total_target), total_target, basename)
-
-        deleted_total += deleted_in_pass
+        
+        # このパスで何も削除できなかったら、もう空になるフォルダはない
         if deleted_in_pass == 0:
             break  
-    for f in folders:
+
+    # 最後に残った（エラーなどで削除できなかった）フォルダのキャッシュもクリア
+    for f in target_set:
         utils.cache_clear_under(f)
+        
+    # 進捗を100%にする
+    if progress_cb:
+        progress_cb(total_target_initial, total_target_initial, "完了")
+        
     return deleted_total
